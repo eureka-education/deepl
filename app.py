@@ -1,17 +1,38 @@
-from Bio import Entrez
 import requests
 from bs4 import BeautifulSoup
 import streamlit as st
-from functools import lru_cache
+from Bio import Entrez
 from concurrent.futures import ThreadPoolExecutor
+
+# 直接DeepL APIキーを入力（セキュリティのため、このような直接入力は避ける方がよい）
+DEEPL_API_KEY = 'dbe78709-8805-4d30-be62-eb4acc1b5392:fx'
+
+if not DEEPL_API_KEY:
+    raise ValueError("DeepL APIキーが設定されていません")
 
 Entrez.email = "your_email@example.com"
 
-# DOIによる要約取得関数をキャッシュ
-@lru_cache(maxsize=100)  # キャッシュサイズの指定
-def fetch_summary_from_pubmed(doi):
+# DeepL APIを使ってテキストを翻訳する関数
+def translate_to_japanese(text):
+    url = "https://api-free.deepl.com/v2/translate"
+    payload = {
+        "auth_key": DEEPL_API_KEY,
+        "text": text,
+        "target_lang": "JA"
+    }
+    response = requests.post(url, data=payload)
+    
+    if response.status_code == 200:
+        translated_data = response.json()
+        translated_text = translated_data["translations"][0]["text"]
+        return translated_text
+    else:
+        return f"翻訳に失敗しました。ステータスコード: {response.status_code}, メッセージ: {response.text}"
+
+# PubMedからDOIを取得して要約を抽出する関数
+def fetch_abstract_from_pubmed(pubmed_id):
     try:
-        pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/?term={doi}"
+        pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/{pubmed_id}/"
         response = requests.get(pubmed_url)
         if response.status_code == 200:
             soup = BeautifulSoup(response.content, "html.parser")
@@ -23,51 +44,40 @@ def fetch_summary_from_pubmed(doi):
     except Exception as e:
         return f"エラーが発生しました: {e}"
 
+# PubMed論文を検索して情報を取得する関数
 def search_and_fetch_pubmed_articles(query, max_results=5):
     try:
         handle = Entrez.esearch(db="pubmed", term=query, sort="most recent", retmax=max_results)
         record = Entrez.read(handle)
         id_list = record["IdList"]
 
-        # 並列処理を導入
+        articles = []
         with ThreadPoolExecutor(max_workers=max_results) as executor:
-            articles = []
             futures = []
             for pubmed_id in id_list:
-                summary_handle = Entrez.esummary(db="pubmed", id=pubmed_id)
-                summary_record = Entrez.read(summary_handle)[0]
-                
-                title = summary_record.get("Title", "タイトルがありません")
-                doi = summary_record.get("DOI", "DOIがありません")
-                authors = ', '.join(summary_record.get("AuthorList", []))
-                
-                # 並列で要約取得を実行
-                future = executor.submit(fetch_summary_from_pubmed, doi)
-                futures.append((future, title, authors, doi))
+                future = executor.submit(fetch_abstract_from_pubmed, pubmed_id)
+                futures.append((future, pubmed_id))
             
-            # 取得結果を順に処理
-            for future, title, authors, doi in futures:
-                abstract = future.result()  # 要約取得結果
+            for future, pubmed_id in futures:
+                abstract = future.result()
+                translated_abstract = translate_to_japanese(abstract)
+                
                 article = {
-                    "title": title,
-                    "authors": authors,
-                    "abstract": abstract,
-                    "doi": doi
+                    "title": f"PubMed Article {pubmed_id}",
+                    "abstract": translated_abstract,
+                    "pubmed_id": pubmed_id
                 }
                 articles.append(article)
         
         return articles
     except Exception as e:
-        return []
+        return f"エラーが発生しました: {e}"
 
-# Streamlit UIの部分は変わりません
-# Streamlitアプリのタイトルを設定
+# Streamlitアプリケーション
 st.title("PubMed論文検索")
 
-# 検索クエリを入力するテキストボックスを表示
 query = st.text_input("検索クエリを入力してください")
 
-# 検索ボタンがクリックされたら、PubMed APIを使用して論文を検索し、要約を取得して表示
 if st.button("検索"):
     if query:
         articles = search_and_fetch_pubmed_articles(query, max_results=5)
@@ -76,9 +86,8 @@ if st.button("検索"):
             for article in articles:
                 st.write("-------")
                 st.write(f"タイトル: {article['title']}")
-                st.write(f"著者: {article['authors']}")
                 st.write(f"要約: {article['abstract']}")
-                st.write(f"DOI: {article['doi']}")
+                st.write(f"PubMed ID: {article['pubmed_id']}")
         else:
             st.warning("検索結果が見つかりませんでした。別のクエリをお試しください。")
     else:
